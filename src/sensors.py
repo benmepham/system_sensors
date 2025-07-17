@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 
-import re
-import time
-import pytz
-import psutil
-import socket
-import platform
-import subprocess
 import datetime as dt
-import sys
-import os
-import shutil
 import json
+import os
+import platform
+import re
+import shutil
+import socket
+import subprocess
+import sys
+import time
+
+import psutil
+import pytz
+
 # import os.path
 
 class PropertyBag(dict):
@@ -336,6 +338,7 @@ def get_host_arch():
 def external_drive_base(drive, drive_path) -> dict:
     return {
         'name': f'Disk Use {drive}',
+        'state_class':'measurement',
         'unit': '%',
         'icon': 'harddisk',
         'sensor_type': 'sensor',
@@ -346,6 +349,7 @@ def external_drive_base(drive, drive_path) -> dict:
 def zpool_base(pool) -> dict:
     return {
         'name': f'Zpool Use {pool}',
+        'state_class':'measurement',
         'unit': '%',
         'icon': 'harddisk',
         'sensor_type': 'sensor',

@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 
-from os import error, path
-import sys
-import time
-import yaml
-import signal
-import pathlib
 import argparse
-import threading
-import paho.mqtt.client as mqtt
 import importlib.metadata
+import pathlib
+import signal
+import sys
+import threading
+import time
+from os import error, path
+
+import paho.mqtt.client as mqtt
+import yaml
 
 from sensors import *
-
 
 mqttClient = None
 global poll_interval
