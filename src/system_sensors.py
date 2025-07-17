@@ -9,6 +9,7 @@ import pathlib
 import argparse
 import threading
 import paho.mqtt.client as mqtt
+import importlib.metadata
 
 from sensors import *
 
@@ -49,8 +50,14 @@ def update_sensors():
     payload_str = f'{{'
     for sensor, attr in sensors.items():
         # Skip sensors that have been disabled or are missing
-        if sensor in external_drives or (settings['sensors'][sensor] is not None and settings['sensors'][sensor] == True):
+        if sensor in external_drives:
             payload_str += f'"{sensor}": "{attr["function"]()}",'
+        elif settings['sensors'][sensor] is not None:
+            if settings['sensors'][sensor] == True:
+                payload_str += f'"{sensor}": "{attr["function"]()}",'
+            elif settings['sensors'][sensor] is not False:
+                payload_str += f'"{sensor}": "{attr["function"](settings["sensors"][sensor])}",'
+
     payload_str = payload_str[:-1]
     payload_str += f'}}'
     mqttClient.publish(
@@ -72,20 +79,21 @@ def send_config_message(mqttClient):
                 mqttClient.publish(
                     topic=f'homeassistant/{attr["sensor_type"]}/{devicename}/{sensor}/config',
                     payload = (f'{{'
-                            + (f'"device_class":"{attr["class"]}",' if 'class' in attr else '')
-			    + (f'"state_class":"{attr["state_class"]}",' if 'state_class' in attr else '')
-                            + f'"name":"{deviceNameDisplay} {attr["name"]}",'
-                            + f'"state_topic":"system-sensors/sensor/{devicename}/state",'
-                            + (f'"unit_of_measurement":"{attr["unit"]}",' if 'unit' in attr else '')
-                            + f'"value_template":"{{{{value_json.{sensor}}}}}",'
-                            + f'"unique_id":"{devicename}_{attr["sensor_type"]}_{sensor}",'
-                            + f'"availability_topic":"system-sensors/sensor/{devicename}/availability",'
-                            + f'"device":{{"identifiers":["{devicename}_sensor"],'
-                            + f'"name":"{deviceNameDisplay} Sensors","model":"{deviceModel}", "manufacturer":"{deviceManufacturer}"}}'
-                            + (f',"icon":"mdi:{attr["icon"]}"' if 'icon' in attr else '')
-                    		    + (f',{attr["prop"]}' if 'prop' in attr else '')
-                            + f'}}'
-                            ),
+                                + (f'"device_class":"{attr["class"]}",' if 'class' in attr else '')
+                                + (f'"state_class":"{attr["state_class"]}",' if 'state_class' in attr else '')
+                                + f'"name":"{attr["name"]}",'
+                                + f'"state_topic":"system-sensors/sensor/{devicename}/state",'
+                                + (f'"unit_of_measurement":"{attr["unit"]}",' if 'unit' in attr else '')
+                                + f'"value_template":"{{{{value_json.{sensor}}}}}",'
+                                + f'"object_id":"{devicename}_{attr["sensor_type"]}_{sensor}",'
+                                + f'"unique_id":"{devicename}_{attr["sensor_type"]}_{sensor}",'
+                                + f'"availability_topic":"system-sensors/sensor/{devicename}/availability",'
+                                + f'"device":{{"identifiers":["{devicename}_sensor"],'
+                                + f'"name":"{deviceNameDisplay} Sensors","model":"{deviceModel}", "manufacturer":"{deviceManufacturer}"}}'
+                                + (f',"icon":"mdi:{attr["icon"]}"' if 'icon' in attr else '')
+                                + (f',{attr["prop"].to_string(devicename)}' if 'prop' in attr else '')
+                                + f'}}'
+                    ),
                     qos=1,
                     retain=True,
                 )
@@ -141,6 +149,12 @@ def check_settings(settings):
         settings['sensors']['updates'] = False
     if 'power_integer_state' in settings:
         write_message_to_console('power_integer_state is deprecated please remove this option power state is now a binary_sensor!')
+    # these two may be present or not, but in case they are not, create a default
+    if 'ha_status' not in settings or settings['ha_status'] == '':
+        settings['ha_status'] = 'hass'
+    if 'tls' not in settings:
+        settings['tls'] = {}
+        settings['tls']['ca_certs'] = ''
 
 def check_zfs(mount_point):
     for disk in psutil.disk_partitions():
@@ -181,17 +195,17 @@ def get_host_model():
         model = f'{deviceManufacturer} {deviceNameDisplay}'
     return model
 
-def on_connect(client, userdata, flags, rc):
-    if rc == 0:
+def on_connect(client, userdata, flags, reason_code='', properties=''):
+    if reason_code == 0:
         write_message_to_console('Connected to broker')
-        print("subscribing : hass/status")
-        client.subscribe('hass/status')
+        print("subscribing : " + f"{ha_status}/status")
+        client.subscribe(f"{ha_status}/status")
         print("subscribing : " + f"system-sensors/sensor/{devicename}/availability")
         mqttClient.publish(f'system-sensors/sensor/{devicename}/availability', 'online', retain=True)
         print("subscribing : " + f"system-sensors/sensor/{devicename}/command")
         client.subscribe(f"system-sensors/sensor/{devicename}/command")#subscribe
         client.publish(f"system-sensors/sensor/{devicename}/command", "setup", retain=True)
-    elif rc == 5:
+    elif reason_code == 'Bad user name or password':
         write_message_to_console('Authentication failed.\n Exiting.')
         sys.exit()
     else:
@@ -239,9 +253,20 @@ if __name__ == '__main__':
     deviceNameDisplay = settings['devicename']
     deviceManufacturer = "RPI Foundation" if "rasp" in OS_DATA["ID"] else OS_DATA['NAME']
     deviceModel = get_host_model()
+    ha_status = settings['ha_status']
     
 
-    mqttClient = mqtt.Client(client_id=settings['client_id'])
+    # https://eclipse.dev/paho/files/paho.mqtt.python/html/migrations.html
+    # note that with version1, mqttv3 is used and no other migration is made
+    # if paho-mqtt v1.6.x gets removed, a full code migration must be made
+    if importlib.metadata.version("paho-mqtt")[0] == '1':
+       # for paho 1.x clients
+       mqttClient = mqtt.Client(client_id=settings['client_id'])
+    else:
+       # for paho 2.x clients
+       # note that a deprecation warning gets logged 
+       mqttClient = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=settings['client_id'])
+
     mqttClient.on_connect = on_connect                      #attach function to callback
     mqttClient.on_message = on_message
     mqttClient.will_set(f'system-sensors/sensor/{devicename}/availability', 'offline', retain=True)
@@ -249,6 +274,12 @@ if __name__ == '__main__':
         mqttClient.username_pw_set(
             settings['mqtt']['user'], settings['mqtt']['password']
         )
+
+    # if ca_certs is populated, we expect the others have been populated accordingly
+    if settings['tls']['ca_certs'] != '':
+      mqttClient.tls_set(
+        ca_certs=settings['tls']['ca_certs'], certfile=settings['tls']['certfile'], keyfile=settings['tls']['keyfile']
+      )
 
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)

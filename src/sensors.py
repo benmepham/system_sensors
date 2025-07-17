@@ -11,11 +11,14 @@ import datetime as dt
 import sys
 import os
 import shutil
+import json
 # import os.path
 
-class ProperyBag(dict):
+class PropertyBag(dict):
     def to_string(self, device_name:str):
-        return str.replace(str.replace(str.replace(self.__str__(), "{device_name}", device_name), "{", ''), "}", '')
+        for key in self.keys():
+            self[key] = str.replace(self[key], "{device_name}", device_name)
+        return str.replace(str.replace(json.dumps(self), "{", ''), "}", '')
 
 # Only needed if using alternate method of obtaining CPU temperature (see commented out code for approach)
 #from os import walk
@@ -56,8 +59,10 @@ with open(os_release) as f:
             row = line.strip().split("=")
             OS_DATA[row[0]] = row[1].strip('"')
 
-old_net_data = psutil.net_io_counters()
-previous_time = time.time() - 10
+old_net_data_tx = psutil.net_io_counters()[0]
+previous_time_tx = time.time() - 10
+old_net_data_rx = psutil.net_io_counters()[1]
+previous_time_rx = time.time() - 10
 UTC = pytz.utc
 DEFAULT_TIME_ZONE = None
 
@@ -100,6 +105,8 @@ def get_updates():
 
 # Temperature method depending on system distro
 def get_temp():
+    # Note that 'Unknown' can be problematic if no temp sensor is found, see get_fan_speed for the reason.
+    # Alternatively, the default can be changed to -273 which is unlikely to happen...
     temp = 'Unknown'
     # Utilising psutil for temp reading on ARM arch
     try:
@@ -126,6 +133,27 @@ def get_temp():
             #                 zone_dir = d
             #                 break
             # temp = str(int(subprocess.check_output(['cat', base_dir + zone_dir + '/temp']).decode('UTF-8')) / 1000)
+
+
+def get_fan_speed():
+    # Formerly the default was 'Unknown' which generates in HA a string/number mismatch error if no fan is found
+    speed = -1
+    # Utilising psutil for fan speed reading on ARM arch
+    try:
+        if not hasattr(psutil, "sensors_fans"):
+            raise NotImplementedError("Platform does not support sensors_fans")
+
+        t = psutil.sensors_fans()
+        # if additional fan names returned by psutil are needed, add them here (see get_temp as example)
+        for x in ['pwmfan', ]:
+            if x in t:
+                speed = t[x][0].current
+                break
+    except (Exception, NotImplementedError) as e:
+        print('Could not establish fan speed reading: ' + str(e))
+        raise
+    return round(speed, 0)
+
 
 # display power method depending on system distro
 def get_display_status():
@@ -176,19 +204,37 @@ def get_memory_usage():
 def get_load(arg):
     return round(psutil.getloadavg()[arg] / psutil.cpu_count() * 100, 1)
 
-def get_net_data(arg):
-    global old_net_data
-    global previous_time
-    current_net_data = psutil.net_io_counters()
+def get_net_data_tx(interface = True):
+    global old_net_data_tx
+    global previous_time_tx
+    current_net_data = []
+    if type(interface) == str:
+        current_net_data = psutil.net_io_counters(pernic=True)[interface][0]
+    else:
+        current_net_data = psutil.net_io_counters()[0]
     current_time = time.time()
-    if current_time == previous_time:
+    if current_time == previous_time_tx:
         current_time += 1
-    net_data = (current_net_data[0] - old_net_data[0]) / (current_time - previous_time) * 8 / 1024
-    net_data = (net_data, (current_net_data[1] - old_net_data[1]) / (current_time - previous_time) * 8 / 1024)
-    previous_time = current_time
-    old_net_data = current_net_data
-    net_data = ['%.2f' % net_data[0], '%.2f' % net_data[1]]
-    return net_data[arg]
+    net_data = (current_net_data - old_net_data_tx) * 8 / (current_time - previous_time_tx) / 1024
+    previous_time_tx = current_time
+    old_net_data_tx = current_net_data
+    return f"{net_data:.2f}"
+
+def get_net_data_rx(interface = True):
+    global old_net_data_rx
+    global previous_time_rx
+    current_net_data = []
+    if type(interface) == str:
+        current_net_data = psutil.net_io_counters(pernic=True)[interface][1]
+    else:
+        current_net_data = psutil.net_io_counters()[1]
+    current_time = time.time()
+    if current_time == previous_time_rx:
+        current_time += 1
+    net_data = (current_net_data - old_net_data_rx) * 8 / (current_time - previous_time_rx) / 1024
+    previous_time_rx = current_time
+    old_net_data_rx = current_net_data
+    return f"{net_data:.2f}"
 
 def get_cpu_usage():
     return str(psutil.cpu_percent(interval=None))
@@ -315,16 +361,20 @@ sensors = {
                  'icon': 'thermometer',
                  'sensor_type': 'sensor',
                  'function': get_temp},
+            'fan_speed':
+                {'name': 'Fan Speed',
+                 'state_class': 'measurement',
+                 'unit': 'rpm',
+                 'icon': 'fan',
+                 'sensor_type': 'sensor',
+                 'function': get_fan_speed},
           'display':
                 {'name':'Display Switch',
                  'icon': 'monitor',
                  'sensor_type': 'switch',
                  'function': get_display_status,
-                 'prop': ProperyBag({
-                     'availability_topic' : "system-sensors/sensor/{device_name}/availability",
+                 'prop': PropertyBag({
                      'command_topic'      : 'system-sensors/sensor/{device_name}/command',
-                     'state_topic'        : 'system-sensors/sensor/{device_name}/state',
-                     'value_template'     : '{{value_json.display}}',
                      'state_off'          : '0',
                      'state_on'           : '1',
                      'payload_off'        : 'display_off',
@@ -384,14 +434,14 @@ sensors = {
                  'unit': 'Kbps',
                  'icon': 'server-network',
                  'sensor_type': 'sensor',
-                 'function': lambda: get_net_data(0)},
+                 'function': get_net_data_tx},
           'net_rx':
                 {'name': 'Network Download',
                  'state_class':'measurement',
                  'unit': 'Kbps',
                  'icon': 'server-network',
                  'sensor_type': 'sensor',
-                 'function': lambda: get_net_data(1)},
+                 'function': get_net_data_rx},
           'swap_usage':
                 {'name':'Swap Usage',
                  'state_class':'measurement',
